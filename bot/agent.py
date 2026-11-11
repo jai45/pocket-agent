@@ -15,6 +15,9 @@ from bot.tools import TOOL_SPECS, is_error, run_tool
 logger = logging.getLogger(__name__)
 
 RESULT_PREVIEW_CHARS = 200
+# Tool results kept in history are short: enough to prove what happened,
+# without a fetched page eating the context on every later turn.
+TOOL_LOG_RESULT_CHARS = 300
 
 
 @dataclass
@@ -40,6 +43,18 @@ def _preview(text: str, limit: int = RESULT_PREVIEW_CHARS) -> str:
     """Shorten long tool results for logs and traces."""
     text = text.replace("\n", " ")
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def build_tool_log(trace: list[ToolCall]) -> str | None:
+    """Summarise this turn's tool calls as a note to keep in history."""
+    if not trace:
+        return None
+    lines = ["Tools used to answer the user message above (recorded by the app):"]
+    for call in trace:
+        args = ", ".join(f"{k}={v!r}" for k, v in call.input.items())
+        status = " (error)" if call.error else ""
+        lines.append(f"- {call.name}({args}){status} -> {_preview(call.result, TOOL_LOG_RESULT_CHARS)}")
+    return "\n".join(lines)
 
 
 async def _run_tool_calls(step: int, tool_uses: list) -> tuple[list[dict], list[ToolCall]]:
@@ -109,5 +124,5 @@ async def run_agent(chat_id: int, user_text: str) -> AgentResult:
         text = text or "I ran out of steps before finishing. Try a simpler request?"
     text = text or "(no reply)"
 
-    history.add_exchange(chat_id, user_text, text)
+    history.add_exchange(chat_id, user_text, text, tool_log=build_tool_log(trace))
     return AgentResult(text=text, trace=trace)

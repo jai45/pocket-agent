@@ -38,3 +38,32 @@ def test_get_history_returns_a_copy():
     history.add_exchange(3, "a", "b")
     history.get_history(3).append({"role": "user", "content": "sneaky"})
     assert len(history.get_history(3)) == 2
+
+
+def test_tool_log_is_stored_between_user_and_reply():
+    history.reset(4)
+    history.add_exchange(4, "6*7?", "42", tool_log="Tools used: calculate -> 42")
+    assert [m["role"] for m in history.get_history(4)] == ["user", "system", "assistant"]
+    history.add_exchange(4, "hi", "hello")
+    assert [m["role"] for m in history.get_history(4)][3:] == ["user", "assistant"]
+    history.reset(4)
+
+
+def test_tool_logs_do_not_count_toward_limit():
+    msgs = []
+    for i in range(3):
+        msgs += [{"role": "user", "content": f"u{i}"},
+                 {"role": "system", "content": f"log{i}"},
+                 {"role": "assistant", "content": f"a{i}"}]
+    trimmed = trim_history(msgs, limit=4)
+    assert [m["content"] for m in trimmed] == ["u1", "log1", "a1", "u2", "log2", "a2"]
+
+
+def test_trim_never_starts_with_an_orphaned_tool_log():
+    msgs = [{"role": "user", "content": "u0"},
+            {"role": "system", "content": "log0"},
+            {"role": "assistant", "content": "a0"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"}]
+    trimmed = trim_history(msgs, limit=3)
+    assert [m["content"] for m in trimmed] == ["u1", "a1"]

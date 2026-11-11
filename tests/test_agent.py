@@ -112,16 +112,41 @@ def test_step_limit_forbids_tools_on_last_step(monkeypatch):
     assert result.text == "Best I can do."
 
 
-def test_history_is_text_only(monkeypatch):
+def test_history_is_text_with_a_tool_log(monkeypatch):
     install(monkeypatch, [
         response([tool_block("t1", "calculate", {"expression": "2"})], "tool_use"),
         response([text_block("2")], "end_turn"),
     ])
     asyncio.run(agent.run_agent(1, "q"))
-    assert history.get_history(1) == [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "2"},
-    ]
+    stored = history.get_history(1)
+    assert [m["role"] for m in stored] == ["user", "system", "assistant"]
+    assert all(isinstance(m["content"], str) for m in stored)
+    assert "calculate(expression='2')" in stored[1]["content"]
+
+
+def test_tool_log_reaches_the_next_request(monkeypatch):
+    fake = install(monkeypatch, [
+        response([tool_block("t1", "calculate", {"expression": "6*7"})], "tool_use"),
+        response([text_block("The calculator says 42.")], "end_turn"),
+        response([text_block("Yes, I checked.")], "end_turn"),
+    ])
+    asyncio.run(agent.run_agent(1, "6*7?"))
+    asyncio.run(agent.run_agent(1, "did you really check?"))
+    sent = fake.calls[2]["messages"]
+    assert [m["role"] for m in sent] == ["user", "system", "assistant", "user"]
+    assert '"result": 42' in sent[1]["content"]
+
+
+def test_no_tool_log_when_no_tools_used(monkeypatch):
+    install(monkeypatch, [response([text_block("Hi!")], "end_turn")])
+    asyncio.run(agent.run_agent(1, "hello"))
+    assert [m["role"] for m in history.get_history(1)] == ["user", "assistant"]
+
+
+def test_tool_log_truncates_long_results():
+    long_call = agent.ToolCall(1, "fetch_url", {"url": "u"}, "x" * 5000, False)
+    log = agent.build_tool_log([long_call])
+    assert len(log) < 500
 
 
 def test_refusal_gets_polite_message(monkeypatch):
