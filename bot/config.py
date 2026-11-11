@@ -5,6 +5,7 @@ committed safely and the same code runs on a laptop or a server.
 """
 
 import os
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -55,6 +56,9 @@ EFFORT: str = os.getenv("EFFORT", "low")
 HISTORY_LIMIT: int = 20
 # Hard stop for the agent loop so a confused model can't call tools forever.
 MAX_AGENT_STEPS: int = 8
+
+# SQLite file for history, reminders and to-dos (data/ is git-ignored).
+DB_PATH: Path = Path(os.getenv("DB_PATH", "data/pocket.db"))
 
 ALLOWED_USER_IDS: set[int] = _parse_user_ids(os.getenv("ALLOWED_USER_IDS", ""))
 TIMEZONE: ZoneInfo = _load_timezone(os.getenv("TIMEZONE", "UTC").strip() or "UTC")

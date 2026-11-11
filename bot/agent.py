@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, field
 
 from bot import config, history, llm
+from bot.tool_context import ToolContext
 from bot.tools import TOOL_SPECS, is_error, run_tool
 
 logger = logging.getLogger(__name__)
@@ -57,14 +58,16 @@ def build_tool_log(trace: list[ToolCall]) -> str | None:
     return "\n".join(lines)
 
 
-async def _run_tool_calls(step: int, tool_uses: list) -> tuple[list[dict], list[ToolCall]]:
+async def _run_tool_calls(
+    step: int, tool_uses: list, ctx: ToolContext
+) -> tuple[list[dict], list[ToolCall]]:
     """Run every tool_use block from one turn concurrently.
 
     Claude can ask for several tools at once (e.g. the time AND a sum). They
     are independent, so we run them in parallel and return ALL results, each
     tagged with the tool_use_id it answers, in a single user message.
     """
-    outputs = await asyncio.gather(*(run_tool(b.name, b.input) for b in tool_uses))
+    outputs = await asyncio.gather(*(run_tool(b.name, b.input, ctx) for b in tool_uses))
 
     results, calls = [], []
     for block, output in zip(tool_uses, outputs):
@@ -86,6 +89,7 @@ async def _run_tool_calls(step: int, tool_uses: list) -> tuple[list[dict], list[
 async def run_agent(chat_id: int, user_text: str) -> AgentResult:
     """Answer one user message, calling tools as needed, and save the exchange."""
     messages = history.get_history(chat_id) + [{"role": "user", "content": user_text}]
+    ctx = ToolContext(chat_id=chat_id)
     trace: list[ToolCall] = []
     text = ""
 
@@ -111,7 +115,7 @@ async def run_agent(chat_id: int, user_text: str) -> AgentResult:
             break
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
-        results, calls = await _run_tool_calls(step, tool_uses)
+        results, calls = await _run_tool_calls(step, tool_uses, ctx)
         trace.extend(calls)
         messages.append({"role": "user", "content": results})
 

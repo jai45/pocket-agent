@@ -1,4 +1,4 @@
-"""Per-chat conversation history.
+"""Per-chat conversation history, stored in SQLite.
 
 Only text is stored here: the user's message, an optional tool log, and
 Claude's final reply. Raw tool_use/tool_result blocks and thinking live only
@@ -9,13 +9,12 @@ thinking blocks.
 The tool log is a mid-conversation `system` message placed between the user
 turn and the reply. Without it, Claude sees past replies like "the calculator
 confirms..." with no evidence a tool ran, and concludes it made that up.
+
+Every message is kept in the database (Phase 3 memory can use it); only the
+last HISTORY_LIMIT user/assistant messages are loaded for each request.
 """
 
-from bot import config
-
-# chat_id -> list of {"role": "user"|"system"|"assistant", "content": str}. In memory, so history is
-# lost on restart; persistence comes in a later phase.
-_histories: dict[int, list[dict]] = {}
+from bot import config, db
 
 
 def trim_history(history: list[dict], limit: int = config.HISTORY_LIMIT) -> list[dict]:
@@ -37,25 +36,40 @@ def trim_history(history: list[dict], limit: int = config.HISTORY_LIMIT) -> list
     return trimmed
 
 
-def get_history(chat_id: int) -> list[dict]:
-    """Return a copy so callers can build on it without mutating stored state."""
-    return list(_histories.get(chat_id, []))
+def get_history(chat_id: int, limit: int = config.HISTORY_LIMIT) -> list[dict]:
+    """Load the recent conversation for one chat, oldest first.
+
+    We fetch 2x the limit because tool logs don't count toward it (at most
+    one per exchange), then trim precisely in Python.
+    """
+    rows = db.get_conn().execute(
+        "SELECT role, content FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+        (chat_id, limit * 2),
+    ).fetchall()
+    messages = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    return trim_history(messages, limit)
 
 
 def add_exchange(chat_id: int, user_text: str, reply: str, tool_log: str | None = None) -> None:
-    """Record one completed exchange (plus its tool log, if any), then trim.
+    """Record one completed exchange (plus its tool log, if any) atomically.
 
-    Saving everything together (only after success) means a failed model
-    call never leaves a dangling user turn behind.
+    Saving everything in one transaction (only after success) means a failed
+    model call never leaves a dangling user turn behind.
     """
-    history = _histories.setdefault(chat_id, [])
-    history.append({"role": "user", "content": user_text})
+    rows = [("user", user_text)]
     if tool_log:
-        history.append({"role": "system", "content": tool_log})
-    history.append({"role": "assistant", "content": reply})
-    _histories[chat_id] = trim_history(history)
+        rows.append(("system", tool_log))
+    rows.append(("assistant", reply))
+    conn = db.get_conn()
+    with conn:
+        conn.executemany(
+            "INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)",
+            [(chat_id, role, content) for role, content in rows],
+        )
 
 
 def reset(chat_id: int) -> None:
     """Forget a chat's history."""
-    _histories.pop(chat_id, None)
+    conn = db.get_conn()
+    with conn:
+        conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))

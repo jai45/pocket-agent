@@ -11,13 +11,14 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
-from bot import config, history
+from bot import config, db, history, reminders
 from bot.agent import AgentResult, run_agent
 from bot.telegram_format import markdown_to_telegram_html
 
@@ -163,15 +164,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(chunk)
 
 
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the Done / Snooze buttons under a reminder (callback data 'rem:<action>:<id>')."""
+    query = update.callback_query
+    if not is_allowed(update):
+        await query.answer()
+        return
+    _, action, raw_id = query.data.split(":")
+    chat_id = query.message.chat.id
+    handler = reminders.mark_done if action == "done" else reminders.snooze
+    text = handler(int(raw_id), chat_id)
+    if text is None:
+        await query.answer("That reminder no longer exists.")
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+    await query.answer()
+    # Replacing the message text also removes the buttons, so they can't be tapped twice.
+    await query.edit_message_text(text)
+
+
+async def on_startup(app: Application) -> None:
+    """Open the database and rebuild reminder jobs before polling starts.
+
+    JobQueue jobs live in memory and vanish on restart; the database is the
+    source of truth, so we reschedule everything from it here.
+    """
+    db.init()
+    reminders.restore(app.job_queue)
+
+
 def main() -> None:
     """Build the Telegram app and start long-polling for updates."""
     if not config.ALLOWED_USER_IDS:
         logger.warning("ALLOWED_USER_IDS is empty: the bot will ignore everyone.")
 
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(on_startup).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("debug", debug))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^rem:(done|snooze):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Pocket Agent starting (model=%s)", config.DEFAULT_MODEL)

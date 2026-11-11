@@ -67,3 +67,21 @@ def test_trim_never_starts_with_an_orphaned_tool_log():
             {"role": "assistant", "content": "a1"}]
     trimmed = trim_history(msgs, limit=3)
     assert [m["content"] for m in trimmed] == ["u1", "a1"]
+
+
+def test_history_survives_reopening_the_database(tmp_path):
+    from bot import db
+    path = tmp_path / "persist.db"
+    db.init(path)
+    history.add_exchange(7, "remember me", "ok")
+    db.init(path)  # simulates a restart
+    assert history.get_history(7)[0]["content"] == "remember me"
+
+
+def test_get_history_loads_only_the_last_n():
+    history.reset(8)
+    for i in range(15):
+        history.add_exchange(8, f"u{i}", f"a{i}", tool_log=f"log{i}" if i % 2 else None)
+    loaded = history.get_history(8, limit=4)
+    assert [m["content"] for m in loaded if m["role"] != "system"] == ["u13", "a13", "u14", "a14"]
+    assert loaded[0]["role"] == "user"
