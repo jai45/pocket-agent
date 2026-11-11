@@ -1,4 +1,4 @@
-"""Telegram entry point: receives messages, keeps history, replies via Claude.
+"""Telegram entry point: receives messages and replies via the agent loop.
 
 Run with:  python -m bot.main
 """
@@ -16,7 +16,8 @@ from telegram.ext import (
     filters,
 )
 
-from bot import config, llm
+from bot import config, history
+from bot.agent import AgentResult, run_agent
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -30,9 +31,8 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_CHARS = 4096
 
-# chat_id -> list of {"role": ..., "content": ...}. In memory for Phase 0,
-# so history is lost on restart; persistence comes in a later phase.
-histories: dict[int, list[dict]] = {}
+# Chats that asked for a tool trace after each reply (/debug). In memory.
+debug_chats: set[int] = set()
 
 
 def is_allowed(update: Update) -> bool:
@@ -42,18 +42,6 @@ def is_allowed(update: Update) -> bool:
         logger.debug("Ignoring message from user %s", user.id if user else None)
         return False
     return True
-
-
-def trim_history(history: list[dict], limit: int = config.HISTORY_LIMIT) -> list[dict]:
-    """Keep the last `limit` messages, making sure the first one is from the user.
-
-    Trimming bounds cost and context size. The API rejects a conversation
-    that starts with an assistant turn, so we drop any leading ones.
-    """
-    trimmed = history[-limit:]
-    while trimmed and trimmed[0]["role"] != "user":
-        trimmed = trimmed[1:]
-    return trimmed
 
 
 def split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
@@ -93,7 +81,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "Hi! I'm Pocket Agent. Send me a message and I'll help out. "
-        "Use /reset to clear our conversation."
+        "Use /reset to clear our conversation and /debug to see which tools I use."
     )
 
 
@@ -101,37 +89,60 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Forget this chat's history so the next message starts fresh."""
     if not is_allowed(update):
         return
-    histories.pop(update.effective_chat.id, None)
+    history.reset(update.effective_chat.id)
     await update.message.reply_text("Conversation cleared. Fresh start!")
 
 
+async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle a short tool trace after each reply, to watch the agent work."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if chat_id in debug_chats:
+        debug_chats.discard(chat_id)
+        await update.message.reply_text("Debug trace off.")
+    else:
+        debug_chats.add(chat_id)
+        await update.message.reply_text("Debug trace on. I'll list the tools I call.")
+
+
+def format_trace(result: AgentResult) -> str:
+    """One line per tool call: step, name, input and a short result."""
+    if not result.trace:
+        return "🔧 no tools used"
+    lines = []
+    for call in result.trace:
+        args = ", ".join(f"{k}={v!r}" for k, v in call.input.items())
+        mark = "⚠️" if call.error else "→"
+        result_text = call.result.replace("\n", " ")
+        if len(result_text) > 80:
+            result_text = result_text[:80] + "…"
+        lines.append(f"🔧 {call.step}. {call.name}({args}) {mark} {result_text}")
+    return "\n".join(lines)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Append the user's message, ask Claude, store and send the reply."""
+    """Run the agent on the user's message and send the reply (plus trace if on)."""
     if not is_allowed(update):
         return
 
     chat_id = update.effective_chat.id
-    history = histories.setdefault(chat_id, [])
-    history.append({"role": "user", "content": update.message.text})
-    history[:] = trim_history(history)
-
     typing = asyncio.create_task(keep_typing(context, chat_id))
     try:
-        reply = await llm.chat(history)
+        result = await run_agent(chat_id, update.message.text)
     except Exception:
-        # Undo the user turn so history keeps alternating user/assistant.
-        history.pop()
-        logger.exception("Model call failed for chat %s", chat_id)
+        # run_agent only saves history on success, so nothing to undo here.
+        logger.exception("Agent failed for chat %s", chat_id)
         await update.message.reply_text("Sorry, something went wrong. Please try again.")
         return
     finally:
         typing.cancel()
 
-    history.append({"role": "assistant", "content": reply})
-    history[:] = trim_history(history)
-
-    for chunk in split_message(reply):
+    for chunk in split_message(result.text):
         await update.message.reply_text(chunk)
+    if chat_id in debug_chats:
+        for chunk in split_message(format_trace(result)):
+            await update.message.reply_text(chunk)
 
 
 def main() -> None:
@@ -142,6 +153,7 @@ def main() -> None:
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("debug", debug))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Pocket Agent starting (model=%s)", config.DEFAULT_MODEL)

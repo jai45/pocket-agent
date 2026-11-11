@@ -53,6 +53,8 @@ MAX_TOKENS: int = 4096
 # MAX_TOKENS. "low" keeps chat replies fast and leaves room for the answer.
 EFFORT: str = os.getenv("EFFORT", "low")
 HISTORY_LIMIT: int = 20
+# Hard stop for the agent loop so a confused model can't call tools forever.
+MAX_AGENT_STEPS: int = 8
 
 ALLOWED_USER_IDS: set[int] = _parse_user_ids(os.getenv("ALLOWED_USER_IDS", ""))
 TIMEZONE: ZoneInfo = _load_timezone(os.getenv("TIMEZONE", "UTC").strip() or "UTC")

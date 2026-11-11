@@ -1,12 +1,7 @@
 """Tests for the pure helpers in bot.main (no network, no Telegram)."""
 
-import os
-
-# config.py requires these at import time; tests never use real values.
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
-os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
-
-from bot.main import split_message, trim_history  # noqa: E402
+from bot.agent import AgentResult, ToolCall
+from bot.main import format_trace, split_message
 
 
 def test_split_short_message_is_untouched():
@@ -25,15 +20,15 @@ def test_split_without_whitespace_hard_cuts():
     assert [len(c) for c in chunks] == [100, 100, 50]
 
 
-def test_trim_keeps_last_n():
-    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(30)]
-    trimmed = trim_history(history, limit=20)
-    assert len(trimmed) == 20
-    assert trimmed[-1]["content"] == "29"
+def test_format_trace_lists_each_call():
+    result = AgentResult("hi", [
+        ToolCall(1, "calculate", {"expression": "2+2"}, '{"result": 4}', False),
+        ToolCall(1, "fetch_url", {"url": "x"}, '{"error": "nope"}', True),
+    ])
+    trace = format_trace(result)
+    assert "1. calculate(expression='2+2') →" in trace
+    assert "⚠️" in trace.splitlines()[1]
 
 
-def test_trim_never_starts_with_assistant():
-    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(21)]
-    trimmed = trim_history(history, limit=20)
-    assert trimmed[0]["role"] == "user"
-    assert len(trimmed) == 19
+def test_format_trace_without_tools():
+    assert format_trace(AgentResult("hi")) == "🔧 no tools used"
