@@ -6,8 +6,9 @@ Run with:  python -m bot.main
 import asyncio
 import logging
 
-from telegram import Update
-from telegram.constants import ChatAction
+from telegram import Message, Update
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -18,6 +19,7 @@ from telegram.ext import (
 
 from bot import config, history
 from bot.agent import AgentResult, run_agent
+from bot.telegram_format import markdown_to_telegram_html
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -30,6 +32,9 @@ for noisy in ("httpx", "httpx2"):  # anthropic 1.x uses httpx2
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_CHARS = 4096
+# Split the Markdown below Telegram's limit: converting to HTML adds tags
+# and escapes (& -> &amp;), so each chunk grows a little.
+REPLY_CHUNK_CHARS = 3800
 
 # Chats that asked for a tool trace after each reply (/debug). In memory.
 debug_chats: set[int] = set()
@@ -62,6 +67,20 @@ def split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
     if text:
         chunks.append(text)
     return chunks
+
+
+async def send_formatted(message: Message, text: str) -> None:
+    """Send Claude's Markdown reply as Telegram HTML, chunked.
+
+    If Telegram rejects a chunk (e.g. a code block split across chunks left
+    an unclosed tag), resend that chunk as plain text so no reply is lost.
+    """
+    for chunk in split_message(text, limit=REPLY_CHUNK_CHARS):
+        try:
+            await message.reply_text(markdown_to_telegram_html(chunk), parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            logger.warning("HTML reply rejected (%s); sending plain text", exc)
+            await message.reply_text(chunk)
 
 
 async def keep_typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -138,8 +157,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     finally:
         typing.cancel()
 
-    for chunk in split_message(result.text):
-        await update.message.reply_text(chunk)
+    await send_formatted(update.message, result.text)
     if chat_id in debug_chats:
         for chunk in split_message(format_trace(result)):
             await update.message.reply_text(chunk)

@@ -32,3 +32,28 @@ def test_format_trace_lists_each_call():
 
 def test_format_trace_without_tools():
     assert format_trace(AgentResult("hi")) == "🔧 no tools used"
+
+
+def test_send_formatted_uses_html():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from bot.main import send_formatted
+
+    message = AsyncMock()
+    asyncio.run(send_formatted(message, "**hi**"))
+    message.reply_text.assert_awaited_once_with("<b>hi</b>", parse_mode="HTML")
+
+
+def test_send_formatted_falls_back_to_plain_text():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from telegram.error import BadRequest
+
+    from bot.main import send_formatted
+
+    message = AsyncMock()
+    message.reply_text.side_effect = [BadRequest("can't parse entities"), None]
+    asyncio.run(send_formatted(message, "**hi**"))
+    assert message.reply_text.await_args_list[-1].args == ("**hi**",)
