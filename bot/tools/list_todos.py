@@ -13,7 +13,8 @@ SPEC = {
     "description": (
         "List the user's open (not completed) to-dos with ids, due dates and "
         "priorities. filter: 'today' = due today or overdue, 'overdue' = past due, "
-        "'all' = every open item. Use before complete_todo if you don't know the id."
+        "'all' = every open item. Use this, not conversation memory, whenever asked "
+        "what to-dos exist. Use before complete_todo if you don't know the id."
     ),
     "input_schema": {
         "type": "object",

@@ -72,3 +72,45 @@ def test_cancel_removes_job_and_hides_from_list(job_queue):
 def test_cannot_cancel_another_chats_reminder():
     rid = set_reminder("x", "2026-11-13T09:00", OTHER)["id"]
     assert "error" in cancel_reminder(rid, CTX)
+
+
+def test_include_past_adds_finished_reminders_newest_first(freeze):
+    from bot import reminders
+    done_id = set_reminder("stretch", "2026-11-12T11:00", CTX)["id"]
+    cancelled_id = set_reminder("vitamins", "2026-11-13T09:00", CTX, repeat="daily")["id"]
+    upcoming_id = set_reminder("call mum", "2026-11-13T18:00", CTX)["id"]
+    reminders.mark_done(done_id, 1)
+    cancel_reminder(cancelled_id, CTX)
+
+    result = list_reminders(CTX, include_past=True)
+    assert [r["id"] for r in result["reminders"]] == [upcoming_id]
+    assert result["past"] == [
+        {"id": cancelled_id, "text": "vitamins", "status": "cancelled", "time": "Fri 13 Nov 09:00", "repeat": "daily"},
+        {"id": done_id, "text": "stretch", "status": "done", "time": "Thu 12 Nov 11:00", "repeat": "none"},
+    ]
+
+
+def test_past_is_omitted_by_default_and_capped():
+    from bot import db
+    from bot.tools.list_reminders import PAST_LIMIT
+    conn = db.get_conn()
+    with conn:
+        conn.executemany(
+            "INSERT INTO reminders (chat_id, text, fire_at, status) VALUES (1, ?, '2026-11-01T10:00:00+00:00', 'fired')",
+            [(f"old {i}",) for i in range(PAST_LIMIT + 5)],
+        )
+    assert "past" not in list_reminders(CTX)
+    past = list_reminders(CTX, include_past=True)["past"]
+    assert len(past) == PAST_LIMIT
+    assert past[0]["text"] == f"old {PAST_LIMIT + 4}"
+
+
+def test_snoozed_reminder_counts_as_upcoming_not_past():
+    from bot import db, reminders
+    rid = set_reminder("x", "2026-11-12T11:00", CTX)["id"]
+    db.get_conn().execute("UPDATE reminders SET status = 'fired' WHERE id = ?", (rid,))
+    db.get_conn().commit()
+    reminders.snooze(rid, 1)
+    result = list_reminders(CTX, include_past=True)
+    assert [r["id"] for r in result["reminders"]] == [rid]
+    assert result["past"] == []
