@@ -9,7 +9,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from bot import config, history, llm
+from bot import config, history, llm, memory
 from bot.tool_context import ToolContext
 from bot.tools import TOOL_SPECS, is_error, run_tool
 
@@ -90,6 +90,8 @@ async def run_agent(chat_id: int, user_text: str) -> AgentResult:
     """Answer one user message, calling tools as needed, and save the exchange."""
     messages = history.get_history(chat_id) + [{"role": "user", "content": user_text}]
     ctx = ToolContext(chat_id=chat_id)
+    # Built once per message: base prompt + this user's saved facts, fresh from the DB.
+    system = memory.build_system_prompt(chat_id)
     trace: list[ToolCall] = []
     text = ""
 
@@ -98,6 +100,7 @@ async def run_agent(chat_id: int, user_text: str) -> AgentResult:
         response = await llm.create(
             messages,
             tools=TOOL_SPECS,
+            system=system,
             # On the final step, forbid tools so Claude must answer with what it has.
             tool_choice={"type": "none"} if last_step else None,
         )

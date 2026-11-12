@@ -33,8 +33,8 @@ class FakeLLM:
         self.responses = list(responses)
         self.calls = []
 
-    async def create(self, messages, tools=None, tool_choice=None):
-        self.calls.append({"messages": list(messages), "tool_choice": tool_choice})
+    async def create(self, messages, tools=None, tool_choice=None, system=None):
+        self.calls.append({"messages": list(messages), "tool_choice": tool_choice, "system": system})
         return self.responses.pop(0)
 
 
@@ -152,3 +152,27 @@ def test_tool_log_truncates_long_results():
 def test_refusal_gets_polite_message(monkeypatch):
     install(monkeypatch, [response([], "refusal")])
     assert asyncio.run(agent.run_agent(1, "bad")).text == "Sorry, I can't help with that one."
+
+
+def test_saved_facts_are_injected_into_the_system_prompt(monkeypatch):
+    from bot import memory
+    memory.add_fact(1, "Vegetarian")
+    memory.add_fact(2, "Someone else's fact")
+    fake = install(monkeypatch, [response([text_block("Try a lentil curry.")], "end_turn")])
+    asyncio.run(agent.run_agent(1, "dinner idea?"))
+    system = fake.calls[0]["system"]
+    assert system.startswith("You are Pocket Agent")
+    assert "Vegetarian" in system
+    assert "Someone else's fact" not in system
+
+
+def test_fact_saved_mid_conversation_shows_up_next_message(monkeypatch):
+    fake = install(monkeypatch, [
+        response([tool_block("t1", "remember_fact", {"fact": "Lives in Toronto"})], "tool_use"),
+        response([text_block("📝 Noted: lives in Toronto (#1)")], "end_turn"),
+        response([text_block("Toronto weather is…")], "end_turn"),
+    ])
+    asyncio.run(agent.run_agent(1, "I live in Toronto"))
+    assert "Lives in Toronto" not in fake.calls[0]["system"]
+    asyncio.run(agent.run_agent(1, "what's the weather like where I live?"))
+    assert "#1 Lives in Toronto" in fake.calls[2]["system"]

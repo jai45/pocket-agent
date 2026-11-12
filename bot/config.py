@@ -57,6 +57,11 @@ HISTORY_LIMIT: int = 20
 # Hard stop for the agent loop so a confused model can't call tools forever.
 MAX_AGENT_STEPS: int = 8
 
+# Symbol shown before money amounts. Expenses assume a single currency.
+CURRENCY: str = os.getenv("CURRENCY", "$")
+# How many profile facts are injected into the system prompt each turn.
+MAX_INJECTED_FACTS: int = 30
+
 # SQLite file for history, reminders and to-dos (data/ is git-ignored).
 DB_PATH: Path = Path(os.getenv("DB_PATH", "data/pocket.db"))
 

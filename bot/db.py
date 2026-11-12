@@ -50,6 +50,70 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_todos_chat ON todos (chat_id, done_at);
     """,
+    # 2: expenses, grocery list, notes (+ full-text index), profile facts
+    """
+    CREATE TABLE expenses (
+        id           INTEGER PRIMARY KEY,
+        chat_id      INTEGER NOT NULL,
+        amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),  -- whole cents: exact sums
+        category     TEXT NOT NULL
+                     CHECK (category IN ('food', 'transport', 'shopping', 'bills', 'fun', 'other')),
+        note         TEXT NOT NULL DEFAULT '',
+        spent_on     TEXT NOT NULL,              -- local calendar date YYYY-MM-DD
+        created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE INDEX idx_expenses_chat ON expenses (chat_id, spent_on);
+
+    CREATE TABLE grocery_items (
+        id         INTEGER PRIMARY KEY,
+        chat_id    INTEGER NOT NULL,
+        name       TEXT NOT NULL,                -- normalised: lower case, single spaces
+        quantity   INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (chat_id, name)                   -- lets "add milk" twice merge into x2
+    );
+
+    CREATE TABLE notes (
+        id         INTEGER PRIMARY KEY,
+        chat_id    INTEGER NOT NULL,
+        title      TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        url        TEXT,
+        tags       TEXT NOT NULL DEFAULT '',     -- ",tag-one,tag-two," for exact LIKE matches
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at TEXT
+    );
+    CREATE INDEX idx_notes_chat ON notes (chat_id);
+
+    -- Full-text index over notes. "External content" means it stores only the
+    -- search index and reads text from `notes`; the triggers keep it in sync,
+    -- so tool code never has to remember to update it.
+    CREATE VIRTUAL TABLE notes_fts USING fts5(
+        title, content, tags, content='notes', content_rowid='id'
+    );
+    CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
+        INSERT INTO notes_fts (rowid, title, content, tags)
+        VALUES (new.id, new.title, new.content, new.tags);
+    END;
+    CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
+        INSERT INTO notes_fts (notes_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+    END;
+    CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
+        INSERT INTO notes_fts (notes_fts, rowid, title, content, tags)
+        VALUES ('delete', old.id, old.title, old.content, old.tags);
+        INSERT INTO notes_fts (rowid, title, content, tags)
+        VALUES (new.id, new.title, new.content, new.tags);
+    END;
+
+    CREATE TABLE profile_facts (
+        id         INTEGER PRIMARY KEY,
+        chat_id    INTEGER NOT NULL,
+        fact       TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE INDEX idx_facts_chat ON profile_facts (chat_id, id);
+    """,
 ]
 
 _conn: sqlite3.Connection | None = None

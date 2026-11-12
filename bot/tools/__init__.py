@@ -17,16 +17,29 @@ from typing import Any, Callable
 
 from bot.tool_context import ToolContext
 from bot.tools import (
+    add_expense,
+    add_grocery_items,
     add_todo,
     calculate,
     cancel_reminder,
+    clear_grocery_items,
     complete_todo,
     convert_units,
+    delete_expense,
+    delete_note,
+    expense_summary,
     fetch_url,
+    forget_fact,
     get_current_time,
+    get_grocery_list,
     list_reminders,
     list_todos,
+    recall_facts,
+    remember_fact,
+    save_note,
+    search_notes,
     set_reminder,
+    update_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +55,19 @@ TOOL_MODULES: list[ModuleType] = [
     add_todo,
     list_todos,
     complete_todo,
+    add_expense,
+    expense_summary,
+    delete_expense,
+    add_grocery_items,
+    get_grocery_list,
+    clear_grocery_items,
+    save_note,
+    search_notes,
+    update_note,
+    delete_note,
+    remember_fact,
+    recall_facts,
+    forget_fact,
 ]
 
 # What we send to the API in the `tools` parameter.

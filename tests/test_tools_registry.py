@@ -12,6 +12,10 @@ def test_every_spec_has_a_matching_function():
         "calculate", "convert_units", "fetch_url", "get_current_time",
         "set_reminder", "list_reminders", "cancel_reminder",
         "add_todo", "list_todos", "complete_todo",
+        "add_expense", "expense_summary", "delete_expense",
+        "add_grocery_items", "get_grocery_list", "clear_grocery_items",
+        "save_note", "search_notes", "update_note", "delete_note",
+        "remember_fact", "recall_facts", "forget_fact",
     ]
     for spec in tools.TOOL_SPECS:
         assert spec["description"] and spec["input_schema"]["type"] == "object"

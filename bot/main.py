@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 
-from bot import config, db, history, reminders
+from bot import config, db, history, memory, reminders
 from bot.agent import AgentResult, run_agent
 from bot.telegram_format import markdown_to_telegram_html
 
@@ -101,7 +101,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "Hi! I'm Pocket Agent. Send me a message and I'll help out. "
-        "Use /reset to clear our conversation and /debug to see which tools I use."
+        "Use /reset to clear our conversation, /debug to see which tools I use, "
+        "and /memory to see what I remember about you."
     )
 
 
@@ -164,6 +165,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(chunk)
 
 
+async def show_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/memory: list saved facts straight from the database (no model call)."""
+    if not is_allowed(update):
+        return
+    facts = memory.list_facts(update.effective_chat.id)
+    if not facts:
+        await update.message.reply_text("I haven't saved any facts about you yet.")
+        return
+    lines = ["🧠 What I remember about you (newest first):"]
+    lines += [f"#{f['id']} {f['fact']}" for f in facts]
+    lines.append("\nUse /forget <id> to delete one.")
+    for chunk in split_message("\n".join(lines)):
+        await update.message.reply_text(chunk)
+
+
+async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/forget <id>: delete one saved fact (only this chat's)."""
+    if not is_allowed(update):
+        return
+    if len(context.args) != 1 or not context.args[0].lstrip("#").isdigit():
+        await update.message.reply_text("Usage: /forget <id>  (see /memory for ids)")
+        return
+    fact_id = int(context.args[0].lstrip("#"))
+    fact = memory.delete_fact(update.effective_chat.id, fact_id)
+    if fact is None:
+        await update.message.reply_text(f"No saved fact #{fact_id}.")
+    else:
+        await update.message.reply_text(f"🗑 Forgot #{fact_id}: {fact}")
+
+
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the Done / Snooze buttons under a reminder (callback data 'rem:<action>:<id>')."""
     query = update.callback_query
@@ -202,6 +233,8 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("debug", debug))
+    app.add_handler(CommandHandler("memory", show_memory))
+    app.add_handler(CommandHandler("forget", forget))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^rem:(done|snooze):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 

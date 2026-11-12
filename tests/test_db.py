@@ -40,3 +40,16 @@ def test_check_constraints_reject_bad_values():
         raise AssertionError("expected constraint failure")
     except sqlite3.IntegrityError:
         pass
+
+
+def test_version_1_database_upgrades_to_latest(tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:1])
+    conn = db.init(path)
+    conn.execute("INSERT INTO todos (chat_id, text) VALUES (1, 'from phase 2')")
+    conn.commit()
+    monkeypatch.undo()
+    conn = db.init(path)  # restart on the new code
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == len(db.MIGRATIONS)
+    assert conn.execute("SELECT text FROM todos").fetchone()[0] == "from phase 2"
+    conn.execute("SELECT * FROM expenses, grocery_items, notes, profile_facts")
