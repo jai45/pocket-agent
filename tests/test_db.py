@@ -53,3 +53,13 @@ def test_version_1_database_upgrades_to_latest(tmp_path, monkeypatch):
     assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == len(db.MIGRATIONS)
     assert conn.execute("SELECT text FROM todos").fetchone()[0] == "from phase 2"
     conn.execute("SELECT * FROM expenses, grocery_items, notes, profile_facts")
+
+
+def test_settings_roundtrip_per_chat():
+    from bot import settings
+    assert settings.get(1, "topics", ["default"]) == ["default"]
+    settings.set(1, "topics", ["tech"])
+    settings.set(1, "topics", ["tech", "world"])
+    settings.set(2, "topics", ["science"])
+    assert settings.get(1, "topics") == ["tech", "world"]
+    assert settings.get(2, "topics") == ["science"]

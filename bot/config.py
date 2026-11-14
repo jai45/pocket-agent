@@ -62,6 +62,34 @@ CURRENCY: str = os.getenv("CURRENCY", "$")
 # How many profile facts are injected into the system prompt each turn.
 MAX_INJECTED_FACTS: int = 30
 
+# Proactive morning briefing (Phase 5).
+# Weather fallback when no location is given and none is known from facts.
+HOME_CITY: str = os.getenv("HOME_CITY", "").strip()
+# Default daily briefing time (HH:MM in TIMEZONE); each chat can change it.
+BRIEFING_TIME: str = os.getenv("BRIEFING_TIME", "07:30").strip()
+# Topic -> RSS/Atom feeds. Feed URLs live in code, not chat: /topics can only
+# pick from these, so nobody can point the bot at an arbitrary URL.
+NEWS_FEEDS: dict[str, list[str]] = {
+    "world": [
+        "https://feeds.bbci.co.uk/news/world/rss.xml",
+        "https://feeds.npr.org/1004/rss.xml",
+    ],
+    "tech": [
+        "https://feeds.arstechnica.com/arstechnica/index",
+        "https://www.theverge.com/rss/index.xml",
+        "https://hnrss.org/frontpage",
+    ],
+    "science": [
+        "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+        "https://www.sciencedaily.com/rss/top/science.xml",
+    ],
+    "business": [
+        "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "https://feeds.npr.org/1006/rss.xml",
+    ],
+}
+DEFAULT_TOPICS: list[str] = ["world", "tech"]
+
 # SQLite file for history, reminders and to-dos (data/ is git-ignored).
 DB_PATH: Path = Path(os.getenv("DB_PATH", "data/pocket.db"))
 

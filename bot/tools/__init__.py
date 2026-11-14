@@ -32,6 +32,8 @@ from bot.tools import (
     forget_fact,
     get_current_time,
     get_grocery_list,
+    get_news,
+    get_weather,
     list_reminders,
     list_todos,
     recall_facts,
@@ -68,6 +70,8 @@ TOOL_MODULES: list[ModuleType] = [
     remember_fact,
     recall_facts,
     forget_fact,
+    get_weather,
+    get_news,
 ]
 
 # What we send to the API in the `tools` parameter.

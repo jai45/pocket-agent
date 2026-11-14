@@ -91,6 +91,7 @@ async def run_agent(
     chat_id: int,
     content: str | list[dict],
     history_text: str | Awaitable[str] | None = None,
+    model: str | None = None,
 ) -> AgentResult:
     """Answer one user message, calling tools as needed, and save the exchange.
 
@@ -101,6 +102,8 @@ async def run_agent(
 
     `history_text` may be an awaitable (e.g. a photo-labelling task started
     in parallel); it is only awaited when saving, so it never delays the reply.
+
+    `model` overrides DEFAULT_MODEL, e.g. FAST_MODEL for the scheduled briefing.
     """
     if history_text is None:
         if not isinstance(content, str):
@@ -119,6 +122,7 @@ async def run_agent(
             messages,
             tools=TOOL_SPECS,
             system=system,
+            model=model or config.DEFAULT_MODEL,
             # On the final step, forbid tools so Claude must answer with what it has.
             tool_choice={"type": "none"} if last_step else None,
         )

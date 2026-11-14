@@ -33,8 +33,9 @@ class FakeLLM:
         self.responses = list(responses)
         self.calls = []
 
-    async def create(self, messages, tools=None, tool_choice=None, system=None):
-        self.calls.append({"messages": list(messages), "tool_choice": tool_choice, "system": system})
+    async def create(self, messages, tools=None, tool_choice=None, system=None, model=None):
+        self.calls.append({"messages": list(messages), "tool_choice": tool_choice, "system": system,
+                           "model": model})
         return self.responses.pop(0)
 
 
@@ -214,3 +215,11 @@ def test_block_content_requires_history_text(monkeypatch):
     install(monkeypatch, [])
     with pytest.raises(ValueError):
         asyncio.run(agent.run_agent(1, [IMAGE]))
+
+
+def test_model_defaults_to_sonnet_and_can_be_overridden(monkeypatch):
+    from bot import config
+    fake = install(monkeypatch, [response([text_block("a")], "end_turn"), response([text_block("b")], "end_turn")])
+    asyncio.run(agent.run_agent(1, "hi"))
+    asyncio.run(agent.run_agent(1, "hi", model=config.FAST_MODEL))
+    assert [c["model"] for c in fake.calls] == [config.DEFAULT_MODEL, config.FAST_MODEL]

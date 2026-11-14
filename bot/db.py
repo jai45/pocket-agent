@@ -114,6 +114,15 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_facts_chat ON profile_facts (chat_id, id);
     """,
+    # 3: per-chat settings (briefing time, news topics, last briefing date)
+    """
+    CREATE TABLE settings (
+        chat_id INTEGER NOT NULL,
+        key     TEXT NOT NULL,
+        value   TEXT NOT NULL,            -- JSON-encoded
+        PRIMARY KEY (chat_id, key)
+    );
+    """,
 ]
 
 _conn: sqlite3.Connection | None = None

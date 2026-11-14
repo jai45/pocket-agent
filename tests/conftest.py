@@ -63,6 +63,11 @@ class FakeJobQueue:
         self.jobs.append(job)
         return job
 
+    def run_daily(self, callback, time, days=(0, 1, 2, 3, 4, 5, 6), data=None, name=None, chat_id=None):
+        job = FakeJob(self, callback, time, data, name, chat_id)
+        self.jobs.append(job)
+        return job
+
     def get_jobs_by_name(self, name):
         return [j for j in self.jobs if j.name == name and not j.removed]
 

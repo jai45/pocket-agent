@@ -10,7 +10,6 @@ from collections.abc import Awaitable
 
 from telegram import Message, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -20,10 +19,11 @@ from telegram.ext import (
     filters,
 )
 
-from bot import config, db, history, memory, reminders
+from bot import config, db, history, memory, reminders, settings
+from bot.jobs import briefing
 from bot.agent import AgentResult, run_agent
 from bot.media import MAX_UPLOAD_BYTES, too_big_message, vision, voice
-from bot.telegram_format import markdown_to_telegram_html
+from bot.replies import send_markdown, split_message
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -34,11 +34,6 @@ logging.basicConfig(
 for noisy in ("httpx", "httpx2"):  # anthropic 1.x uses httpx2
     logging.getLogger(noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
-
-TELEGRAM_MAX_CHARS = 4096
-# Split the Markdown below Telegram's limit: converting to HTML adds tags
-# and escapes (& -> &amp;), so each chunk grows a little.
-REPLY_CHUNK_CHARS = 3800
 
 # Chats that asked for a tool trace after each reply (/debug). In memory.
 debug_chats: set[int] = set()
@@ -53,38 +48,9 @@ def is_allowed(update: Update) -> bool:
     return True
 
 
-def split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
-    """Split text into chunks Telegram will accept, preferring newline breaks.
-
-    Breaking on a newline (or failing that, a space) keeps chunks readable
-    instead of cutting words in half.
-    """
-    chunks: list[str] = []
-    while len(text) > limit:
-        cut = text.rfind("\n", 0, limit)
-        if cut <= 0:
-            cut = text.rfind(" ", 0, limit)
-        if cut <= 0:
-            cut = limit
-        chunks.append(text[:cut])
-        text = text[cut:].lstrip("\n ")
-    if text:
-        chunks.append(text)
-    return chunks
-
-
 async def send_formatted(message: Message, text: str) -> None:
-    """Send Claude's Markdown reply as Telegram HTML, chunked.
-
-    If Telegram rejects a chunk (e.g. a code block split across chunks left
-    an unclosed tag), resend that chunk as plain text so no reply is lost.
-    """
-    for chunk in split_message(text, limit=REPLY_CHUNK_CHARS):
-        try:
-            await message.reply_text(markdown_to_telegram_html(chunk), parse_mode=ParseMode.HTML)
-        except BadRequest as exc:
-            logger.warning("HTML reply rejected (%s); sending plain text", exc)
-            await message.reply_text(chunk)
+    """Reply to a user's message with Claude's Markdown rendered as HTML."""
+    await send_markdown(message.reply_text, text)
 
 
 async def keep_typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -105,7 +71,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hi! I'm Pocket Agent. Send me a message and I'll help out. "
         "Use /reset to clear our conversation, /debug to see which tools I use, "
-        "and /memory to see what I remember about you."
+        "/memory to see what I remember about you, and /briefing for your "
+        "morning briefing (/briefing_time, /topics to set it up)."
     )
 
 
@@ -272,6 +239,76 @@ async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"🗑 Forgot #{fact_id}: {fact}")
 
 
+async def briefing_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/briefing: build one right now. You asked, so the quiet/once-a-day checks don't apply."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    typing = asyncio.create_task(keep_typing(context, chat_id))
+    try:
+        await briefing.run_briefing(context.bot, chat_id)
+    except Exception:
+        logger.exception("Manual briefing failed for chat %s", chat_id)
+        await update.message.reply_text("Sorry, I couldn't put the briefing together. Please try again.")
+    finally:
+        typing.cancel()
+
+
+async def briefing_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/briefing_time HH:MM | off: save the daily time and reschedule immediately."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if len(context.args) != 1:
+        current = briefing.briefing_time(chat_id)
+        await update.message.reply_text(
+            f"Your briefing time is {current} ({config.TIMEZONE}). "
+            "Change it with /briefing_time HH:MM, or /briefing_time off."
+        )
+        return
+    value = context.args[0].strip().lower()
+    if value != briefing.OFF:
+        parsed = briefing.parse_time(value)
+        if parsed is None:
+            await update.message.reply_text("Use 24-hour HH:MM, e.g. /briefing_time 07:30 (or 'off').")
+            return
+        value = parsed.strftime("%H:%M")
+    settings.set(chat_id, "briefing_time", value)
+    briefing.schedule(context.application.job_queue, chat_id)
+    if value == briefing.OFF:
+        await update.message.reply_text("☀️ Morning briefing turned off. /briefing_time HH:MM turns it back on.")
+    else:
+        await update.message.reply_text(f"☀️ Morning briefing set for {value} every day ({config.TIMEZONE}).")
+
+
+async def topics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/topics, /topics add <topic>, /topics remove <topic>."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    current = briefing.topics(chat_id)
+    available = ", ".join(config.NEWS_FEEDS)
+    if not context.args:
+        await update.message.reply_text(
+            f"📰 Your topics: {', '.join(current) or 'none'}\nAvailable: {available}\n"
+            "Use /topics add <topic> or /topics remove <topic>."
+        )
+        return
+    if len(context.args) != 2 or context.args[0].lower() not in ("add", "remove"):
+        await update.message.reply_text("Usage: /topics add <topic> or /topics remove <topic>")
+        return
+    action, topic = context.args[0].lower(), context.args[1].lower()
+    if topic not in config.NEWS_FEEDS:
+        await update.message.reply_text(f"I don't have feeds for '{topic}'. Available: {available}")
+        return
+    if action == "add":
+        new = current if topic in current else current + [topic]
+    else:
+        new = [t for t in current if t != topic]
+    settings.set(chat_id, "topics", new)
+    await update.message.reply_text(f"📰 Topics: {', '.join(new) or 'none'}")
+
+
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the Done / Snooze buttons under a reminder (callback data 'rem:<action>:<id>')."""
     query = update.callback_query
@@ -299,6 +336,7 @@ async def on_startup(app: Application) -> None:
     """
     db.init()
     reminders.restore(app.job_queue)
+    briefing.restore(app.job_queue)
     # Load Whisper once (a few seconds; first run also downloads it). In a
     # thread so a slow download can't stall the event loop.
     await asyncio.to_thread(voice.load_model)
@@ -315,6 +353,9 @@ def main() -> None:
     app.add_handler(CommandHandler("debug", debug))
     app.add_handler(CommandHandler("memory", show_memory))
     app.add_handler(CommandHandler("forget", forget))
+    app.add_handler(CommandHandler("briefing", briefing_now))
+    app.add_handler(CommandHandler("briefing_time", briefing_time))
+    app.add_handler(CommandHandler("topics", topics))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^rem:(done|snooze):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
