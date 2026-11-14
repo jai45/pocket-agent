@@ -42,6 +42,7 @@ from bot.tools import (
     search_notes,
     set_reminder,
     update_note,
+    web_search,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ TOOL_MODULES: list[ModuleType] = [
     forget_fact,
     get_weather,
     get_news,
+    web_search,
 ]
 
 # What we send to the API in the `tools` parameter.

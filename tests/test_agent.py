@@ -223,3 +223,32 @@ def test_model_defaults_to_sonnet_and_can_be_overridden(monkeypatch):
     asyncio.run(agent.run_agent(1, "hi"))
     asyncio.run(agent.run_agent(1, "hi", model=config.FAST_MODEL))
     assert [c["model"] for c in fake.calls] == [config.DEFAULT_MODEL, config.FAST_MODEL]
+
+
+def test_search_then_read_chain(monkeypatch):
+    """search -> pick -> fetch (parallel) -> answer, through the normal loop."""
+    from bot import tools as registry
+    calls = []
+
+    async def fake_search(query, max_results=5, freshness=None):
+        calls.append(("web_search", query))
+        return {"query": query, "results": [{"title": "A", "url": "https://a.test"},
+                                            {"title": "B", "url": "https://b.test"}]}
+
+    async def fake_fetch(url):
+        calls.append(("fetch_url", url))
+        return {"url": url, "title": url, "text": f"text of {url}", "truncated": False}
+
+    monkeypatch.setitem(registry._FUNCTIONS, "web_search", fake_search)
+    monkeypatch.setitem(registry._FUNCTIONS, "fetch_url", fake_fetch)
+    fake = install(monkeypatch, [
+        response([tool_block("s", "web_search", {"query": "starship"})], "tool_use"),
+        response([tool_block("f1", "fetch_url", {"url": "https://a.test"}),
+                  tool_block("f2", "fetch_url", {"url": "https://b.test"})], "tool_use"),
+        response([text_block("It flew. Sources: https://a.test, https://b.test")], "end_turn"),
+    ])
+    result = asyncio.run(agent.run_agent(1, "latest on starship?"))
+    assert calls == [("web_search", "starship"), ("fetch_url", "https://a.test"), ("fetch_url", "https://b.test")]
+    page_results = fake.calls[2]["messages"][-1]["content"]
+    assert [r["tool_use_id"] for r in page_results] == ["f1", "f2"]
+    assert [c.name for c in result.trace] == ["web_search", "fetch_url", "fetch_url"]

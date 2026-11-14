@@ -65,6 +65,9 @@ MAX_INJECTED_FACTS: int = 30
 # Proactive morning briefing (Phase 5).
 # Weather fallback when no location is given and none is known from facts.
 HOME_CITY: str = os.getenv("HOME_CITY", "").strip()
+# Brave Search API key for the web_search tool (optional; search is
+# disabled without it). Secret, so only ever read from .env.
+BRAVE_API_KEY: str = os.getenv("BRAVE_API_KEY", "").strip()
 # Default daily briefing time (HH:MM in TIMEZONE); each chat can change it.
 BRIEFING_TIME: str = os.getenv("BRIEFING_TIME", "07:30").strip()
 # Topic -> RSS/Atom feeds. Feed URLs live in code, not chat: /topics can only

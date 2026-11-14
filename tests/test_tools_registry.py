@@ -16,7 +16,7 @@ def test_every_spec_has_a_matching_function():
         "add_grocery_items", "get_grocery_list", "clear_grocery_items",
         "save_note", "search_notes", "update_note", "delete_note",
         "remember_fact", "recall_facts", "forget_fact",
-        "get_weather", "get_news",
+        "get_weather", "get_news", "web_search",
     ]
     for spec in tools.TOOL_SPECS:
         assert spec["description"] and spec["input_schema"]["type"] == "object"
