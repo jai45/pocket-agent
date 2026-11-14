@@ -176,3 +176,41 @@ def test_fact_saved_mid_conversation_shows_up_next_message(monkeypatch):
     assert "Lives in Toronto" not in fake.calls[0]["system"]
     asyncio.run(agent.run_agent(1, "what's the weather like where I live?"))
     assert "#1 Lives in Toronto" in fake.calls[2]["system"]
+
+
+IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"}}
+
+
+def test_image_content_is_sent_every_step_but_only_placeholder_saved(monkeypatch):
+    fake = install(monkeypatch, [
+        response([tool_block("t1", "get_current_time", {})], "tool_use"),
+        response([text_block("A receipt from Cafe Uno, $12.40 on 12 Nov. Log this as an expense?")], "end_turn"),
+    ])
+    content = [IMAGE, {"type": "text", "text": "what's this?"}]
+    asyncio.run(agent.run_agent(1, content, history_text="[photo: cafe receipt] what's this?"))
+
+    for call in fake.calls:  # both steps still see the image
+        user_turns = [m for m in call["messages"] if m["role"] == "user" and isinstance(m["content"], list)]
+        assert user_turns[0]["content"][0] is IMAGE
+    stored = history.get_history(1)
+    assert stored[0] == {"role": "user", "content": "[photo: cafe receipt] what's this?"}
+    assert all(isinstance(m["content"], str) for m in stored)
+    assert "AAAA" not in str(stored)
+
+
+def test_history_text_can_be_awaitable(monkeypatch):
+    install(monkeypatch, [response([text_block("Nice cat.")], "end_turn")])
+
+    async def go():
+        async def label():
+            return "[photo: cat on sofa]"
+        return await agent.run_agent(1, [IMAGE, {"type": "text", "text": "hi"}], history_text=label())
+
+    asyncio.run(go())
+    assert history.get_history(1)[0]["content"] == "[photo: cat on sofa]"
+
+
+def test_block_content_requires_history_text(monkeypatch):
+    install(monkeypatch, [])
+    with pytest.raises(ValueError):
+        asyncio.run(agent.run_agent(1, [IMAGE]))

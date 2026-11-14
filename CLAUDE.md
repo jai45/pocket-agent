@@ -5,7 +5,7 @@ I am building it to LEARN agentic engineering, so clarity beats cleverness.
 
 ## Current phase
 
-Phase 3 (see phase list below). Only build what the current phase asks for.
+Phase 4 (see phase list below). Only build what the current phase asks for.
 
 ## Stack
 

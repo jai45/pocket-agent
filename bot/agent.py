@@ -7,6 +7,7 @@ Adding a tool never requires editing this file; see bot/tools/__init__.py.
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 
 from bot import config, history, llm, memory
@@ -86,9 +87,26 @@ async def _run_tool_calls(
     return results, calls
 
 
-async def run_agent(chat_id: int, user_text: str) -> AgentResult:
-    """Answer one user message, calling tools as needed, and save the exchange."""
-    messages = history.get_history(chat_id) + [{"role": "user", "content": user_text}]
+async def run_agent(
+    chat_id: int,
+    content: str | list[dict],
+    history_text: str | Awaitable[str] | None = None,
+) -> AgentResult:
+    """Answer one user message, calling tools as needed, and save the exchange.
+
+    `content` is plain text, or a list of content blocks (e.g. an image block
+    plus a text block). The full content is sent on every step of this loop,
+    but only `history_text` is saved to the DB: history stays text-only, so
+    image bytes are never stored or re-sent on later messages.
+
+    `history_text` may be an awaitable (e.g. a photo-labelling task started
+    in parallel); it is only awaited when saving, so it never delays the reply.
+    """
+    if history_text is None:
+        if not isinstance(content, str):
+            raise ValueError("history_text is required when content is not plain text")
+        history_text = content
+    messages = history.get_history(chat_id) + [{"role": "user", "content": content}]
     ctx = ToolContext(chat_id=chat_id)
     # Built once per message: base prompt + this user's saved facts, fresh from the DB.
     system = memory.build_system_prompt(chat_id)
@@ -131,5 +149,7 @@ async def run_agent(chat_id: int, user_text: str) -> AgentResult:
         text = text or "I ran out of steps before finishing. Try a simpler request?"
     text = text or "(no reply)"
 
-    history.add_exchange(chat_id, user_text, text, tool_log=build_tool_log(trace))
+    if not isinstance(history_text, str):
+        history_text = await history_text
+    history.add_exchange(chat_id, history_text, text, tool_log=build_tool_log(trace))
     return AgentResult(text=text, trace=trace)

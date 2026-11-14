@@ -1,10 +1,12 @@
-"""Telegram entry point: receives messages and replies via the agent loop.
+"""Telegram entry point: receives text, photos and voice notes; replies via the agent loop.
 
 Run with:  python -m bot.main
 """
 
 import asyncio
+import html
 import logging
+from collections.abc import Awaitable
 
 from telegram import Message, Update
 from telegram.constants import ChatAction, ParseMode
@@ -20,6 +22,7 @@ from telegram.ext import (
 
 from bot import config, db, history, memory, reminders
 from bot.agent import AgentResult, run_agent
+from bot.media import MAX_UPLOAD_BYTES, too_big_message, vision, voice
 from bot.telegram_format import markdown_to_telegram_html
 
 logging.basicConfig(
@@ -142,15 +145,17 @@ def format_trace(result: AgentResult) -> str:
     return "\n".join(lines)
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Run the agent on the user's message and send the reply (plus trace if on)."""
-    if not is_allowed(update):
-        return
-
+async def answer(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    content: str | list[dict],
+    history_text: str | Awaitable[str] | None = None,
+) -> None:
+    """Shared reply path for text, photos and voice: typing, agent, reply, trace."""
     chat_id = update.effective_chat.id
     typing = asyncio.create_task(keep_typing(context, chat_id))
     try:
-        result = await run_agent(chat_id, update.message.text)
+        result = await run_agent(chat_id, content, history_text)
     except Exception:
         # run_agent only saves history on success, so nothing to undo here.
         logger.exception("Agent failed for chat %s", chat_id)
@@ -163,6 +168,78 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if chat_id in debug_chats:
         for chunk in split_message(format_trace(result)):
             await update.message.reply_text(chunk)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the agent on the user's message and send the reply (plus trace if on)."""
+    if not is_allowed(update):
+        return
+    await answer(update, context, update.message.text)
+
+
+async def _reject_if_too_big(update: Update, size: int | None) -> bool:
+    """Check Telegram's reported size BEFORE downloading anything."""
+    if size and size > MAX_UPLOAD_BYTES:
+        await update.message.reply_text(too_big_message(size))
+        return True
+    return False
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Photo -> resized image block + caption -> agent.
+
+    A 3-word label for history is requested from the fast model in parallel,
+    so it doesn't add to the reply time.
+    """
+    if not is_allowed(update):
+        return
+    largest = update.message.photo[-1]  # Telegram lists sizes small -> large
+    if await _reject_if_too_big(update, largest.file_size):
+        return
+    try:
+        raw = await (await largest.get_file()).download_as_bytearray()
+        image_block = vision.prepare_image(bytes(raw))
+    except vision.ImageError:
+        await update.message.reply_text("I couldn't open that image. Could you try another one?")
+        return
+
+    caption = (update.message.caption or "").strip()
+    text_block = {"type": "text", "text": caption or vision.DEFAULT_CAPTION}
+
+    async def placeholder() -> str:
+        return vision.history_placeholder(await vision.label_image(image_block), caption or None)
+
+    label_task = asyncio.create_task(placeholder())
+    await answer(update, context, [image_block, text_block], history_text=label_task)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Voice note -> local transcript (echoed in italics) -> agent as plain text."""
+    if not is_allowed(update):
+        return
+    if not voice.is_available():
+        await update.message.reply_text("Voice notes aren't available right now. Could you type it?")
+        return
+    note = update.message.voice
+    if await _reject_if_too_big(update, note.file_size):
+        return
+
+    typing = asyncio.create_task(keep_typing(context, update.effective_chat.id))
+    try:
+        audio = await (await note.get_file()).download_as_bytearray()
+        transcript = await voice.transcribe(bytes(audio))
+    except Exception:
+        logger.exception("Voice transcription failed")
+        await update.message.reply_text("Sorry, I couldn't transcribe that one. Could you try again?")
+        return
+    finally:
+        typing.cancel()
+
+    if not transcript:
+        await update.message.reply_text("I couldn't make out any words. Try again?")
+        return
+    await update.message.reply_text(f"🎙 <i>{html.escape(transcript)}</i>", parse_mode=ParseMode.HTML)
+    await answer(update, context, transcript, history_text=f"🎙 {transcript}")
 
 
 async def show_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,6 +299,9 @@ async def on_startup(app: Application) -> None:
     """
     db.init()
     reminders.restore(app.job_queue)
+    # Load Whisper once (a few seconds; first run also downloads it). In a
+    # thread so a slow download can't stall the event loop.
+    await asyncio.to_thread(voice.load_model)
 
 
 def main() -> None:
@@ -237,6 +317,8 @@ def main() -> None:
     app.add_handler(CommandHandler("forget", forget))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^rem:(done|snooze):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     logger.info("Pocket Agent starting (model=%s)", config.DEFAULT_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
