@@ -6,8 +6,12 @@ from bot.tool_context import ToolContext
 SPEC = {
     "name": "complete_todo",
     "description": (
-        "Mark a to-do as done by its id. If you don't know the id, call list_todos "
-        "first. Do not guess ids."
+        "Mark a to-do as done by its id. Use it whenever the user says they did, "
+        "finished or no longer need to do something that might be on their to-do "
+        "list (e.g. 'I filed my taxes', 'booked the flights'), even if they don't "
+        "mention the list: call list_todos to find the matching item, complete it, "
+        "and confirm. Don't ask whether to; if nothing matches, just reply normally. "
+        "Do not guess ids."
     ),
     "input_schema": {
         "type": "object",

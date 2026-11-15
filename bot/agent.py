@@ -7,12 +7,14 @@ Adding a tool never requires editing this file; see bot/tools/__init__.py.
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 
 from bot import config, history, llm, memory
+from bot.runlog import RunLog
 from bot.tool_context import ToolContext
-from bot.tools import TOOL_SPECS, is_error, run_tool
+from bot.tools import TOOL_SPECS, confirmation_id, is_error, run_tool
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ class ToolCall:
     input: dict
     result: str
     error: bool
+    latency_ms: float = 0.0
 
 
 @dataclass
@@ -39,6 +42,8 @@ class AgentResult:
 
     text: str
     trace: list[ToolCall] = field(default_factory=list)
+    # Pending action ids from tools that need a Yes/No tap (bot/confirmations.py).
+    pending: list[int] = field(default_factory=list)
 
 
 def _preview(text: str, limit: int = RESULT_PREVIEW_CHARS) -> str:
@@ -68,10 +73,15 @@ async def _run_tool_calls(
     are independent, so we run them in parallel and return ALL results, each
     tagged with the tool_use_id it answers, in a single user message.
     """
-    outputs = await asyncio.gather(*(run_tool(b.name, b.input, ctx) for b in tool_uses))
+    async def timed(block) -> tuple[str, float]:
+        start = time.perf_counter()
+        output = await run_tool(block.name, block.input, ctx)
+        return output, (time.perf_counter() - start) * 1000
+
+    outputs = await asyncio.gather(*(timed(b) for b in tool_uses))
 
     results, calls = [], []
-    for block, output in zip(tool_uses, outputs):
+    for block, (output, latency_ms) in zip(tool_uses, outputs):
         failed = is_error(output)
         logger.info(
             "agent_step step=%d tool=%s input=%s result=%s",
@@ -83,7 +93,7 @@ async def _run_tool_calls(
             "content": output,
             "is_error": failed,
         })
-        calls.append(ToolCall(step, block.name, block.input, output, failed))
+        calls.append(ToolCall(step, block.name, block.input, output, failed, latency_ms))
     return results, calls
 
 
@@ -92,6 +102,7 @@ async def run_agent(
     content: str | list[dict],
     history_text: str | Awaitable[str] | None = None,
     model: str | None = None,
+    trigger: str = "text",
 ) -> AgentResult:
     """Answer one user message, calling tools as needed, and save the exchange.
 
@@ -103,12 +114,31 @@ async def run_agent(
     `history_text` may be an awaitable (e.g. a photo-labelling task started
     in parallel); it is only awaited when saving, so it never delays the reply.
 
-    `model` overrides DEFAULT_MODEL, e.g. FAST_MODEL for the scheduled briefing.
+    `model` overrides DEFAULT_MODEL (FAST_MODEL for the briefing or when over
+    budget). `trigger` only labels the structured run log.
     """
     if history_text is None:
         if not isinstance(content, str):
             raise ValueError("history_text is required when content is not plain text")
         history_text = content
+    model = model or config.DEFAULT_MODEL
+    run = RunLog(chat_id=chat_id, trigger=trigger, model=model)
+    try:
+        result = await _loop(chat_id, content, history_text, model, run)
+    except llm.ModelUnavailable:
+        run.finish("overloaded")
+        raise
+    except Exception:
+        run.finish("error")
+        raise
+    run.finish("ok")
+    return result
+
+
+async def _loop(
+    chat_id: int, content: str | list[dict], history_text: str | Awaitable[str], model: str, run: RunLog
+) -> AgentResult:
+    """The loop itself: call the model, run its tools, repeat until it answers."""
     messages = history.get_history(chat_id) + [{"role": "user", "content": content}]
     ctx = ToolContext(chat_id=chat_id)
     # Built once per message: base prompt + this user's saved facts, fresh from the DB.
@@ -118,14 +148,16 @@ async def run_agent(
 
     for step in range(1, config.MAX_AGENT_STEPS + 1):
         last_step = step == config.MAX_AGENT_STEPS
+        start = time.perf_counter()
         response = await llm.create(
             messages,
             tools=TOOL_SPECS,
             system=system,
-            model=model or config.DEFAULT_MODEL,
+            model=model,
             # On the final step, forbid tools so Claude must answer with what it has.
             tool_choice={"type": "none"} if last_step else None,
         )
+        latency_ms = (time.perf_counter() - start) * 1000
         logger.info(
             "agent_turn step=%d stop_reason=%s input_tokens=%d output_tokens=%d",
             step, response.stop_reason, response.usage.input_tokens, response.usage.output_tokens,
@@ -137,10 +169,12 @@ async def run_agent(
         text = llm.response_text(response)
 
         if response.stop_reason != "tool_use":
+            run.add_step(step, response, latency_ms, [])
             break
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
         results, calls = await _run_tool_calls(step, tool_uses, ctx)
+        run.add_step(step, response, latency_ms, calls)
         trace.extend(calls)
         messages.append({"role": "user", "content": results})
 
@@ -156,4 +190,5 @@ async def run_agent(
     if not isinstance(history_text, str):
         history_text = await history_text
     history.add_exchange(chat_id, history_text, text, tool_log=build_tool_log(trace))
-    return AgentResult(text=text, trace=trace)
+    pending = [i for i in (confirmation_id(c.result) for c in trace) if i is not None]
+    return AgentResult(text=text, trace=trace, pending=pending)

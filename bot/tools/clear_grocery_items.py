@@ -21,6 +21,20 @@ SPEC = {
 }
 
 
+def NEEDS_CONFIRMATION(tool_input: dict) -> bool:  # noqa: N802 - same name as the flag
+    """Only emptying the WHOLE list needs a Yes; removing bought items doesn't."""
+    return bool(tool_input.get("all"))
+
+
+def describe_action(ctx: ToolContext, items: list[str] | None = None, all: bool = False) -> str | dict:  # noqa: A002
+    count = db.get_conn().execute(
+        "SELECT COUNT(*) FROM grocery_items WHERE chat_id = ?", (ctx.chat_id,)
+    ).fetchone()[0]
+    if count == 0:
+        return {"error": "the grocery list is already empty"}
+    return f"clear the whole grocery list ({count} items)"
+
+
 def clear_grocery_items(ctx: ToolContext, items: list[str] | None = None, all: bool = False) -> dict:  # noqa: A002
     conn = db.get_conn()
     if all:

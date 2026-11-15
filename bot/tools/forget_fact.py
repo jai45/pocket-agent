@@ -17,6 +17,16 @@ SPEC = {
 }
 
 
+NEEDS_CONFIRMATION = True
+
+
+def describe_action(id: int, ctx: ToolContext) -> str | dict:  # noqa: A002
+    fact = next((f["fact"] for f in memory.list_facts(ctx.chat_id) if f["id"] == id), None)
+    if fact is None:
+        return {"error": f"no saved fact with id {id}"}
+    return f'forget fact #{id} "{fact}"'
+
+
 def forget_fact(id: int, ctx: ToolContext) -> dict:  # noqa: A002 - matches the tool schema
     fact = memory.delete_fact(ctx.chat_id, id)
     if fact is None:

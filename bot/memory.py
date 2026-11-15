@@ -83,10 +83,14 @@ def facts_block(chat_id: int, limit: int = config.MAX_INJECTED_FACTS) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(chat_id: int) -> str:
-    """Base prompt first, then the facts.
+def build_system_prompt(chat_id: int) -> list[dict]:
+    """System prompt as two blocks: the fixed base prompt, then this user's facts.
 
-    The fixed part stays first so a future prompt-cache breakpoint can cover
-    it even though the facts change.
+    Two blocks so llm.create can put a prompt-cache breakpoint after the
+    fixed part: saving a new fact then changes only the small second block,
+    and the big tools + base prompt prefix is still read from cache.
     """
-    return f"{SYSTEM_PROMPT}\n{facts_block(chat_id)}\n"
+    return [
+        {"type": "text", "text": SYSTEM_PROMPT},
+        {"type": "text", "text": facts_block(chat_id)},
+    ]

@@ -7,6 +7,13 @@ and add it to TOOL_MODULES below; the agent loop never needs editing.
 Tools that need harness facts (which chat this is) declare a `ctx`
 parameter; run_tool passes the ToolContext only to those. `ctx` is never in
 a SPEC, so the model can't supply or override it.
+
+Risky tools set NEEDS_CONFIRMATION (True, or a function of the input) and
+may define describe_action(...) -> str | {"error"} for the Yes/No question.
+The flag lives next to SPEC, not inside it: the API rejects unknown fields
+in a tool definition. When it applies, run_tool does NOT run the tool; it
+saves a pending action and the bot asks the user with buttons. Only a tap
+on Yes (bot.confirmations) runs it, with confirmed=True.
 """
 
 import inspect
@@ -15,6 +22,7 @@ import logging
 from types import ModuleType
 from typing import Any, Callable
 
+from bot import confirmations
 from bot.tool_context import ToolContext
 from bot.tools import (
     add_expense,
@@ -85,6 +93,66 @@ _FUNCTIONS: dict[str, Callable[..., Any]] = {
 }
 
 
+_MODULES: dict[str, ModuleType] = {m.SPEC["name"]: m for m in TOOL_MODULES}
+
+AWAITING = "awaiting_confirmation"
+
+
+def needs_confirmation(name: str, tool_input: dict) -> bool:
+    """Whether this call must wait for the user's Yes (e.g. only clear ALL groceries)."""
+    flag = getattr(_MODULES.get(name), "NEEDS_CONFIRMATION", False)
+    return bool(flag(tool_input)) if callable(flag) else bool(flag)
+
+
+def _call_kwargs(func: Callable[..., Any], tool_input: dict, ctx: ToolContext | None) -> dict:
+    """Model input minus any 'ctx' it tried to send, plus the real ctx if wanted."""
+    kwargs = {k: v for k, v in tool_input.items() if k != "ctx"}  # model can't inject ctx
+    if _wants_ctx(func):
+        kwargs["ctx"] = ctx
+    return kwargs
+
+
+async def _call(func: Callable[..., Any], kwargs: dict) -> Any:
+    if inspect.iscoroutinefunction(func):
+        return await func(**kwargs)
+    return func(**kwargs)
+
+
+def _request_confirmation(name: str, tool_input: dict, ctx: ToolContext) -> dict:
+    """Validate and describe the action, then park it until the user taps Yes/No.
+
+    describe_action runs first so a bad id fails now ("no reminder #9"),
+    instead of showing buttons for something that can't happen.
+    """
+    describe = getattr(_MODULES[name], "describe_action", None)
+    summary = f"run {name}"
+    if describe is not None:
+        described = describe(**_call_kwargs(describe, tool_input, ctx))
+        if isinstance(described, dict):
+            return described  # {"error": ...}
+        summary = described
+    action_id = confirmations.create(ctx.chat_id, name, tool_input, summary)
+    return {
+        "status": AWAITING,
+        "confirmation_id": action_id,
+        "action": summary,
+        "note": "NOT done yet. The app is showing the user Yes/No buttons for this. "
+                "Tell them in one short line what will happen if they tap Yes; "
+                "don't ask again in text and don't say it is done.",
+    }
+
+
+def confirmation_id(result_text: str) -> int | None:
+    """The pending action id if a tool result is an awaiting-confirmation result."""
+    try:
+        parsed = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(parsed, dict) and parsed.get("status") == AWAITING:
+        return parsed.get("confirmation_id")
+    return None
+
+
 def _to_text(result: Any) -> str:
     """tool_result content must be text; dicts become JSON."""
     if isinstance(result, str):
@@ -96,25 +164,28 @@ def _wants_ctx(func: Callable[..., Any]) -> bool:
     return "ctx" in inspect.signature(func).parameters
 
 
-async def run_tool(name: str, tool_input: dict, ctx: ToolContext | None = None) -> str:
+async def run_tool(
+    name: str, tool_input: dict, ctx: ToolContext | None = None, confirmed: bool = False
+) -> str:
     """Run a tool by name and always return text, never raise.
 
     A crash inside one tool should become an error message Claude can read
     and react to (retry, apologise, try another tool), not a dead bot.
+    `confirmed=True` is passed only by the Yes button handler, never by the
+    agent loop, so the model has no way to skip the confirmation.
     """
     func = _FUNCTIONS.get(name)
     if func is None:
         return _to_text({"error": f"Unknown tool: {name}"})
-    kwargs = {k: v for k, v in tool_input.items() if k != "ctx"}  # model can't inject ctx
-    if _wants_ctx(func):
-        if ctx is None:
-            return _to_text({"error": f"{name} needs a chat context"})
-        kwargs["ctx"] = ctx
+    if _wants_ctx(func) and ctx is None:
+        return _to_text({"error": f"{name} needs a chat context"})
     try:
-        if inspect.iscoroutinefunction(func):
-            result = await func(**kwargs)
+        if needs_confirmation(name, tool_input) and not confirmed:
+            if ctx is None:
+                return _to_text({"error": f"{name} needs a chat context"})
+            result = _request_confirmation(name, tool_input, ctx)
         else:
-            result = func(**kwargs)
+            result = await _call(func, _call_kwargs(func, tool_input, ctx))
     except TypeError as exc:
         # Usually Claude sent wrong or missing arguments.
         return _to_text({"error": f"Bad input for {name}: {exc}"})

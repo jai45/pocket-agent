@@ -12,7 +12,7 @@ from functools import partial
 
 from telegram.ext import ContextTypes, JobQueue
 
-from bot import config, db, settings, timeutil
+from bot import config, db, settings, timeutil, usage
 from bot.agent import AgentResult, run_agent
 from bot.replies import send_markdown
 
@@ -69,6 +69,8 @@ def _last_user_message_at(chat_id: int) -> datetime | None:
 def skip_reason(chat_id: int) -> str | None:
     """Why the scheduled briefing shouldn't go out now, or None to send it."""
     today = timeutil.local_today().isoformat()
+    if usage.budget_state() == usage.BLOCKED:
+        return "over 2x the daily budget"
     if settings.get(chat_id, "last_briefing_date") == today:
         return "already sent today"
     last = _last_user_message_at(chat_id)
@@ -84,7 +86,8 @@ async def run_briefing(bot, chat_id: int) -> AgentResult:
     two: at most one per day, at the cost of none if something fails.
     """
     settings.set(chat_id, "last_briefing_date", timeutil.local_today().isoformat())
-    result = await run_agent(chat_id, build_prompt(chat_id), history_text=HISTORY_TEXT, model=config.FAST_MODEL)
+    result = await run_agent(chat_id, build_prompt(chat_id), history_text=HISTORY_TEXT,
+                             model=config.FAST_MODEL, trigger="briefing")
     await send_markdown(partial(bot.send_message, chat_id), result.text)
     logger.info("briefing_sent chat=%s tools=%s", chat_id, [c.name for c in result.trace])
     return result

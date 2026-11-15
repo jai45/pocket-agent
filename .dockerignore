@@ -1,0 +1,13 @@
+# Secrets come in at run time via env_file, never baked into the image.
+.env
+.env.*
+.venv/
+venv/
+data/
+.git/
+.claude/
+tests/
+docs/
+__pycache__/
+*.py[cod]
+.pytest_cache/

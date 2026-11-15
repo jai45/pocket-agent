@@ -97,4 +97,25 @@ DEFAULT_TOPICS: list[str] = ["world", "tech"]
 DB_PATH: Path = Path(os.getenv("DB_PATH", "data/pocket.db"))
 
 ALLOWED_USER_IDS: set[int] = _parse_user_ids(os.getenv("ALLOWED_USER_IDS", ""))
-TIMEZONE: ZoneInfo = _load_timezone(os.getenv("TIMEZONE", "UTC").strip() or "UTC")
+# Required: a silent UTC default would put every reminder at the wrong hour.
+TIMEZONE: ZoneInfo = _load_timezone(_require("TIMEZONE"))
+
+# Hardening (Phase 6).
+# Daily spend limit in USD across all chats. At 1x the bot switches to
+# FAST_MODEL; at 2x it politely refuses chat messages. 0 or unset = no limit.
+DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "0") or 0)
+# USD per million tokens, used only to ESTIMATE spend (your Anthropic bill is
+# the source of truth). Keys are model-name prefixes, so dated ids match too.
+MODEL_PRICES: dict[str, dict[str, float]] = {
+    "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_read": 0.10, "cache_write": 2.50},
+    "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+}
+# Total attempts per model call (1 try + 2 retries) for overload/rate limits.
+LLM_MAX_TRIES: int = 3
+# One JSON line per agent run, one file per day; deleted after LOG_RETENTION_DAYS.
+LOG_DIR: Path = Path(os.getenv("LOG_DIR", "data/logs"))
+LOG_RETENTION_DAYS: int = 30
+# Nightly SQLite backups (HH:MM in TIMEZONE), keeping the newest BACKUP_KEEP.
+BACKUP_DIR: Path = Path(os.getenv("BACKUP_DIR", "data/backups"))
+BACKUP_TIME: str = os.getenv("BACKUP_TIME", "03:00").strip()
+BACKUP_KEEP: int = 7

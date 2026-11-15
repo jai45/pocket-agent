@@ -19,8 +19,8 @@ from telegram.ext import (
     filters,
 )
 
-from bot import config, db, history, memory, reminders, settings
-from bot.jobs import briefing
+from bot import config, confirmations, db, history, llm, memory, reminders, settings, timeutil, usage
+from bot.jobs import backup, briefing
 from bot.agent import AgentResult, run_agent
 from bot.media import MAX_UPLOAD_BYTES, too_big_message, vision, voice
 from bot.replies import send_markdown, split_message
@@ -72,7 +72,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Hi! I'm Pocket Agent. Send me a message and I'll help out. "
         "Use /reset to clear our conversation, /debug to see which tools I use, "
         "/memory to see what I remember about you, and /briefing for your "
-        "morning briefing (/briefing_time, /topics to set it up)."
+        "morning briefing (/briefing_time, /topics to set it up). /cost shows API spend."
     )
 
 
@@ -112,17 +112,60 @@ def format_trace(result: AgentResult) -> str:
     return "\n".join(lines)
 
 
+OVERLOADED_TEXT = "Claude is overloaded right now. Please try again in a minute."
+BUDGET_BLOCKED_TEXT = (
+    "I've hit today's spending limit, so I'm pausing chat until tomorrow. "
+    "Commands like /memory and reminders still work."
+)
+BUDGET_FAST_TEXT = "ℹ️ Today's budget is used up, so I'm switching to the faster, cheaper model for the rest of the day."
+
+
+async def budget_model(update: Update) -> tuple[bool, str | None]:
+    """Check the daily budget before any model work: (allowed, model override).
+
+    Checked per message, not per model call, so a reply is never cut off
+    halfway through its tool loop. The 'switching models' notice is sent
+    once per chat per day.
+    """
+    state = usage.budget_state()
+    if state == usage.BLOCKED:
+        await update.message.reply_text(BUDGET_BLOCKED_TEXT)
+        return False, None
+    if state == usage.FAST:
+        chat_id = update.effective_chat.id
+        today = timeutil.local_today().isoformat()
+        if settings.get(chat_id, "budget_notice_date") != today:
+            settings.set(chat_id, "budget_notice_date", today)
+            await update.message.reply_text(BUDGET_FAST_TEXT)
+        return True, config.FAST_MODEL
+    return True, None
+
+
+async def send_confirmations(update: Update, result: AgentResult) -> None:
+    """One Yes/No message per action the agent asked to run (cancel, forget, clear all)."""
+    chat_id = update.effective_chat.id
+    for action_id in result.pending:
+        text = confirmations.question(action_id, chat_id)
+        if text:
+            await update.message.reply_text(text, reply_markup=confirmations.keyboard(action_id))
+
+
 async def answer(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     content: str | list[dict],
     history_text: str | Awaitable[str] | None = None,
+    model: str | None = None,
+    trigger: str = "text",
 ) -> None:
-    """Shared reply path for text, photos and voice: typing, agent, reply, trace."""
+    """Shared reply path for text, photos and voice: typing, agent, reply, buttons, trace."""
     chat_id = update.effective_chat.id
     typing = asyncio.create_task(keep_typing(context, chat_id))
     try:
-        result = await run_agent(chat_id, content, history_text)
+        result = await run_agent(chat_id, content, history_text, model=model, trigger=trigger)
+    except llm.ModelUnavailable:
+        await update.message.reply_text(OVERLOADED_TEXT)
+        return
     except Exception:
         # run_agent only saves history on success, so nothing to undo here.
         logger.exception("Agent failed for chat %s", chat_id)
@@ -132,6 +175,7 @@ async def answer(
         typing.cancel()
 
     await send_formatted(update.message, result.text)
+    await send_confirmations(update, result)
     if chat_id in debug_chats:
         for chunk in split_message(format_trace(result)):
             await update.message.reply_text(chunk)
@@ -141,7 +185,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Run the agent on the user's message and send the reply (plus trace if on)."""
     if not is_allowed(update):
         return
-    await answer(update, context, update.message.text)
+    allowed, model = await budget_model(update)
+    if allowed:
+        await answer(update, context, update.message.text, model=model)
 
 
 async def _reject_if_too_big(update: Update, size: int | None) -> bool:
@@ -163,6 +209,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     largest = update.message.photo[-1]  # Telegram lists sizes small -> large
     if await _reject_if_too_big(update, largest.file_size):
         return
+    allowed, model = await budget_model(update)
+    if not allowed:
+        return
     try:
         raw = await (await largest.get_file()).download_as_bytearray()
         image_block = vision.prepare_image(bytes(raw))
@@ -177,7 +226,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return vision.history_placeholder(await vision.label_image(image_block), caption or None)
 
     label_task = asyncio.create_task(placeholder())
-    await answer(update, context, [image_block, text_block], history_text=label_task)
+    await answer(update, context, [image_block, text_block], history_text=label_task, model=model, trigger="photo")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -189,6 +238,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     note = update.message.voice
     if await _reject_if_too_big(update, note.file_size):
+        return
+    allowed, model = await budget_model(update)
+    if not allowed:
         return
 
     typing = asyncio.create_task(keep_typing(context, update.effective_chat.id))
@@ -206,7 +258,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("I couldn't make out any words. Try again?")
         return
     await update.message.reply_text(f"🎙 <i>{html.escape(transcript)}</i>", parse_mode=ParseMode.HTML)
-    await answer(update, context, transcript, history_text=f"🎙 {transcript}")
+    await answer(update, context, transcript, history_text=f"🎙 {transcript}", model=model, trigger="voice")
 
 
 async def show_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,6 +291,13 @@ async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"🗑 Forgot #{fact_id}: {fact}")
 
 
+async def cost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/cost: estimated spend today and this month, straight from the usage table."""
+    if not is_allowed(update):
+        return
+    await update.message.reply_text(usage.cost_report())
+
+
 async def briefing_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/briefing: build one right now. You asked, so the quiet/once-a-day checks don't apply."""
     if not is_allowed(update):
@@ -247,6 +306,8 @@ async def briefing_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     typing = asyncio.create_task(keep_typing(context, chat_id))
     try:
         await briefing.run_briefing(context.bot, chat_id)
+    except llm.ModelUnavailable:
+        await update.message.reply_text(OVERLOADED_TEXT)
     except Exception:
         logger.exception("Manual briefing failed for chat %s", chat_id)
         await update.message.reply_text("Sorry, I couldn't put the briefing together. Please try again.")
@@ -328,6 +389,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.edit_message_text(text)
 
 
+async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle ✅ Yes / ❌ No under a pending action (callback data 'confirm:<yes|no>:<id>').
+
+    Only here, after a human tap, does a confirmation-gated tool really run.
+    """
+    query = update.callback_query
+    if not is_allowed(update):
+        await query.answer()
+        return
+    _, choice, raw_id = query.data.split(":")
+    text = await confirmations.resolve(int(raw_id), query.message.chat.id, approved=choice == "yes")
+    await query.answer()
+    # Replacing the text removes the buttons, so they can't be tapped twice.
+    await query.edit_message_text(text)
+
+
 async def on_startup(app: Application) -> None:
     """Open the database and rebuild reminder jobs before polling starts.
 
@@ -337,6 +414,7 @@ async def on_startup(app: Application) -> None:
     db.init()
     reminders.restore(app.job_queue)
     briefing.restore(app.job_queue)
+    backup.schedule(app.job_queue)
     # Load Whisper once (a few seconds; first run also downloads it). In a
     # thread so a slow download can't stall the event loop.
     await asyncio.to_thread(voice.load_model)
@@ -356,7 +434,9 @@ def main() -> None:
     app.add_handler(CommandHandler("briefing", briefing_now))
     app.add_handler(CommandHandler("briefing_time", briefing_time))
     app.add_handler(CommandHandler("topics", topics))
+    app.add_handler(CommandHandler("cost", cost))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^rem:(done|snooze):\d+$"))
+    app.add_handler(CallbackQueryHandler(on_confirm, pattern=r"^confirm:(yes|no):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))

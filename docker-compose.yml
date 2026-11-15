@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    env_file: .env          # your secrets stay in .env on the server
+    volumes:
+      - ./data:/data        # DB, run logs, backups and the Whisper cache
+    restart: unless-stopped # come back after crashes and reboots
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

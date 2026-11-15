@@ -39,7 +39,7 @@ def agent_calls(monkeypatch):
     """Capture what reaches the agent; resolve history_text like run_agent would."""
     calls = []
 
-    async def fake_run_agent(chat_id, content, history_text=None):
+    async def fake_run_agent(chat_id, content, history_text=None, model=None, trigger="text"):
         if history_text is not None and not isinstance(history_text, str):
             history_text = await history_text
         calls.append({"content": content, "history_text": history_text})

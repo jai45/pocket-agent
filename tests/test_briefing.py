@@ -32,7 +32,7 @@ def _user_message_at(dt: datetime, text="hi"):
 def agent_calls(monkeypatch):
     calls = []
 
-    async def fake_run_agent(chat_id, content, history_text=None, model=None):
+    async def fake_run_agent(chat_id, content, history_text=None, model=None, trigger="text"):
         calls.append({"chat_id": chat_id, "content": content, "history_text": history_text, "model": model})
         history.add_exchange(chat_id, history_text, "☀️ Sunny, 2 to-dos, 3 headlines")
         return AgentResult(text="☀️ **Sunny**, 2 to-dos, 3 headlines")

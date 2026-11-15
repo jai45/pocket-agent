@@ -123,6 +123,33 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (chat_id, key)
     );
     """,
+    # 4: model usage for cost tracking, and actions waiting for a Yes/No tap
+    """
+    CREATE TABLE usage (
+        id                 INTEGER PRIMARY KEY,
+        created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        local_date         TEXT NOT NULL,        -- YYYY-MM-DD in TIMEZONE: "today" for budgets
+        model              TEXT NOT NULL,
+        input_tokens       INTEGER NOT NULL,     -- uncached input only
+        output_tokens      INTEGER NOT NULL,     -- includes thinking
+        cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd           REAL NOT NULL         -- estimate from MODEL_PRICES at call time
+    );
+    CREATE INDEX idx_usage_date ON usage (local_date);
+
+    CREATE TABLE pending_actions (
+        id          INTEGER PRIMARY KEY,
+        chat_id     INTEGER NOT NULL,
+        tool        TEXT NOT NULL,
+        input       TEXT NOT NULL,               -- JSON tool input, run as-is on Yes
+        summary     TEXT NOT NULL,               -- e.g. 'cancel reminder #3 "call mum"'
+        status      TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'confirmed', 'declined', 'expired')),
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        resolved_at TEXT
+    );
+    """,
 ]
 
 _conn: sqlite3.Connection | None = None

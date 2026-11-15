@@ -52,9 +52,10 @@ def test_block_when_empty():
 
 def test_build_system_prompt_keeps_base_first():
     memory.add_fact(1, "Vegetarian")
-    prompt = memory.build_system_prompt(1)
-    assert prompt.startswith("You are Pocket Agent")
-    assert prompt.rstrip().endswith("- #1 Vegetarian")
+    base, facts = memory.build_system_prompt(1)
+    assert base["text"].startswith("You are Pocket Agent")
+    assert "Vegetarian" not in base["text"]  # fixed block stays identical, so it can be cached
+    assert facts["text"].rstrip().endswith("- #1 Vegetarian")
 
 
 def _update(chat_id=1, user_id=None):

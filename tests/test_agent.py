@@ -161,7 +161,7 @@ def test_saved_facts_are_injected_into_the_system_prompt(monkeypatch):
     memory.add_fact(2, "Someone else's fact")
     fake = install(monkeypatch, [response([text_block("Try a lentil curry.")], "end_turn")])
     asyncio.run(agent.run_agent(1, "dinner idea?"))
-    system = fake.calls[0]["system"]
+    system = "\n".join(b["text"] for b in fake.calls[0]["system"])
     assert system.startswith("You are Pocket Agent")
     assert "Vegetarian" in system
     assert "Someone else's fact" not in system
@@ -174,9 +174,9 @@ def test_fact_saved_mid_conversation_shows_up_next_message(monkeypatch):
         response([text_block("Toronto weather is…")], "end_turn"),
     ])
     asyncio.run(agent.run_agent(1, "I live in Toronto"))
-    assert "Lives in Toronto" not in fake.calls[0]["system"]
+    assert "Lives in Toronto" not in str(fake.calls[0]["system"])
     asyncio.run(agent.run_agent(1, "what's the weather like where I live?"))
-    assert "#1 Lives in Toronto" in fake.calls[2]["system"]
+    assert "#1 Lives in Toronto" in str(fake.calls[2]["system"])
 
 
 IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"}}
@@ -252,3 +252,15 @@ def test_search_then_read_chain(monkeypatch):
     page_results = fake.calls[2]["messages"][-1]["content"]
     assert [r["tool_use_id"] for r in page_results] == ["f1", "f2"]
     assert [c.name for c in result.trace] == ["web_search", "fetch_url", "fetch_url"]
+
+
+def test_confirmation_tools_end_up_as_pending_ids(monkeypatch):
+    from bot import memory
+    fact_id, _ = memory.add_fact(1, "Lives in Toronto")
+    install(monkeypatch, [
+        response([tool_block("t1", "forget_fact", {"id": fact_id})], "tool_use"),
+        response([text_block("Tap Yes to forget that you live in Toronto.")], "end_turn"),
+    ])
+    result = asyncio.run(agent.run_agent(1, "forget where I live"))
+    assert len(result.pending) == 1
+    assert memory.count_facts(1) == 1  # not deleted until the user taps Yes

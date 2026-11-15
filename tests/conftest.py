@@ -10,6 +10,7 @@ import os
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+os.environ.setdefault("TIMEZONE", "UTC")
 
 from datetime import datetime, timezone  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
@@ -20,7 +21,11 @@ from bot import config, db, reminders, timeutil  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def temp_db(tmp_path):
+def temp_db(tmp_path, monkeypatch):
+    # Run logs and backups go to the test's temp dir, never data/.
+    monkeypatch.setattr(config, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(config, "BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(config, "DAILY_BUDGET_USD", 0.0)
     db.init(tmp_path / "test.db")
     reminders.attach(None)
     yield
