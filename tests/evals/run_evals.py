@@ -2,6 +2,7 @@
 
     python -m tests.evals.run_evals                    # all cases once
     python -m tests.evals.run_evals --only bought_groceries,todo_with_due_date --repeat 3
+    python -m tests.evals.run_evals --tag web          # only cases tagged 'web'
     python -m tests.evals.run_evals --live-network     # real weather/news/search/pages
 
 Unit tests check that tools work; evals check that the model CHOOSES the
@@ -15,6 +16,7 @@ tell a real change from noise. Not collected by pytest (it costs money).
 import argparse
 import asyncio
 import logging
+import re
 import sys
 import tempfile
 import time
@@ -40,8 +42,23 @@ CTX = ToolContext(CHAT_ID)
 
 # --- Canned network tools --------------------------------------------------
 
-def stub_network(pages: dict[str, str]) -> None:
-    """Swap the four network tools in the registry for offline fakes."""
+DEFAULT_RESULTS = [
+    {"title": "Race report: Driver A wins the latest Grand Prix", "url": "https://example.com/race",
+     "snippet": "Driver A took victory ahead of Driver B and Driver C.", "age": "2 days ago"},
+]
+DEFAULT_PAGE = "Race report: Driver A won the latest Grand Prix, ahead of Driver B."
+URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
+
+
+def stub_network(setup: dict) -> None:
+    """Swap the four network tools in the registry for offline fakes.
+
+    A case can shape them: `search_results` (what web_search returns),
+    `search_error` (web_search fails), and `pages` (url -> text, or
+    {error: ...} for a dead link; unknown URLs get a generic page).
+    """
+    pages = setup.get("pages", {})
+    results = setup.get("search_results", DEFAULT_RESULTS)
 
     async def get_weather(location: str | None = None, days: int = 1, **_) -> dict:
         return {"location": location or "Lisbon, Portugal", "today": {
@@ -55,17 +72,26 @@ def stub_network(pages: dict[str, str]) -> None:
         ]}
 
     async def web_search(query: str, max_results: int = 5, freshness: str | None = None, **_) -> dict:
-        return {"query": query, "results": [
-            {"title": "Race report: Driver A wins the latest Grand Prix", "url": "https://example.com/race",
-             "snippet": "Driver A took victory ahead of Driver B and Driver C.", "age": "2 days ago"},
-        ]}
+        if setup.get("search_error"):
+            return {"error": setup["search_error"]}
+        return {"query": query, "results": results[: max(1, min(int(max_results), 10))]}
 
     async def fetch_url(url: str, **_) -> dict:
-        text = pages.get(url, "Race report: Driver A won the latest Grand Prix, ahead of Driver B.")
-        return {"url": url, "title": "Example page", "text": text, "truncated": False}
+        page = pages.get(url, DEFAULT_PAGE)
+        if isinstance(page, dict):
+            return {"error": page.get("error", "could not fetch")}
+        return {"url": url, "title": "Example page", "text": page, "truncated": False}
 
     for fn in (get_weather, get_news, web_search, fetch_url):
         _FUNCTIONS[fn.__name__] = fn
+
+
+def known_urls(case: dict) -> set[str]:
+    """URLs the model was legitimately given: in the message or in search results."""
+    setup = case.get("setup", {})
+    urls = set(URL_RE.findall(case["message"]))
+    urls |= {r["url"] for r in setup.get("search_results", DEFAULT_RESULTS)}
+    return urls
 
 
 # --- Setup -----------------------------------------------------------------
@@ -91,19 +117,52 @@ def apply_setup(setup: dict) -> None:
 
 # --- Checking --------------------------------------------------------------
 
-def check(expect: dict, tools: list[str], reply: str) -> list[str]:
-    """Return the reasons a case failed (empty list = pass)."""
+def _norm(url: str) -> str:
+    return url.rstrip("/.,")
+
+
+def check(expect: dict, calls: list[tuple[str, dict]], reply: str, known: set[str] | None = None) -> list[str]:
+    """Return the reasons a case failed (empty list = pass).
+
+    `calls` is [(tool name, tool input), ...] in order, so we can check the
+    path the agent took (which URLs, which arguments), not just the reply.
+    """
     problems = []
+    tools = [name for name, _ in calls]
+    fetched = [_norm(str(inp.get("url", ""))) for name, inp in calls if name == "fetch_url"]
     lower = reply.lower()
+
     for name in expect.get("tools_called", []):
         if name not in tools:
             problems.append(f"expected {name} to be called")
     for name in expect.get("tools_not_called", []):
         if name in tools:
             problems.append(f"{name} should NOT be called")
+    for name, limits in expect.get("tool_counts", {}).items():
+        n = tools.count(name)
+        if n < limits.get("min", 0) or n > limits.get("max", 10**6):
+            problems.append(f"{name} called {n}x, expected {limits.get('min', 0)}..{limits.get('max', 'any')}")
+    for rule in expect.get("tool_args", []):
+        values = [inp.get(rule["arg"]) for name, inp in calls if name == rule["tool"]]
+        if not any(v in rule["in"] for v in values):
+            problems.append(f"{rule['tool']}.{rule['arg']} was {values}, expected one of {rule['in']}")
+    for url in expect.get("urls_fetched", []):
+        if _norm(url) not in fetched:
+            problems.append(f"expected {url} to be fetched")
+    for part in expect.get("urls_not_fetched", []):
+        if any(part in u for u in fetched):
+            problems.append(f"fetched a URL containing {part!r}")
+    if expect.get("fetch_only_known_urls"):
+        allowed = {_norm(u) for u in (known or set())}
+        for url in fetched:
+            if url not in allowed:
+                problems.append(f"fetched a URL it wasn't given: {url}")
     for text in expect.get("reply_contains", []):
         if str(text).lower() not in lower:
             problems.append(f"reply missing {text!r}")
+    any_of = expect.get("reply_contains_any", [])
+    if any_of and not any(str(t).lower() in lower for t in any_of):
+        problems.append(f"reply has none of {any_of}")
     for text in expect.get("reply_not_contains", []):
         if str(text).lower() in lower:
             problems.append(f"reply contains {text!r}")
@@ -115,13 +174,16 @@ async def run_case(case: dict, workdir: Path, n: int, live_network: bool) -> tup
     db.init(workdir / f"eval-{n}.db")
     reminders.attach(None)  # no Telegram job queue: reminders are saved, not scheduled
     if not live_network:
-        stub_network(case.get("setup", {}).get("pages", {}))
+        stub_network(case.get("setup", {}))
     apply_setup(case.get("setup", {}))
     try:
         result = await run_agent(CHAT_ID, case["message"], trigger="eval")
-        tools = [c.name for c in result.trace]
-        problems = check(case.get("expect", {}), tools, result.text)
-        detail = f"tools={tools}"
+        calls = [(c.name, c.input) for c in result.trace]
+        problems = check(case.get("expect", {}), calls, result.text, known_urls(case))
+        detail = "tools=" + ", ".join(
+            f"{n}({i.get('url') or i.get('query') or ''})" if n in ("fetch_url", "web_search") else n
+            for n, i in calls
+        )
         reply = result.text.replace("\n", " ")
         detail += f" reply={reply[:120]!r}"
     except Exception as exc:  # noqa: BLE001 - a crash is a failed case, not a dead run
@@ -135,6 +197,7 @@ async def run_case(case: dict, workdir: Path, n: int, live_network: bool) -> tup
 async def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", help="comma-separated case ids")
+    parser.add_argument("--tag", help="only cases with this tag, e.g. web")
     parser.add_argument("--repeat", type=int, default=1, help="run each case N times")
     parser.add_argument("--live-network", action="store_true", help="don't stub weather/news/search/pages")
     parser.add_argument("--verbose", action="store_true", help="show tools for passing cases too")
@@ -142,12 +205,14 @@ async def main(argv: list[str]) -> int:
 
     logging.basicConfig(level=logging.WARNING)  # keep per-call INFO lines out of the report
     cases = yaml.safe_load(CASES_FILE.read_text())
+    if args.tag:
+        cases = [c for c in cases if args.tag in c.get("tags", [])]
     if args.only:
         wanted = set(args.only.split(","))
         cases = [c for c in cases if c["id"] in wanted]
-        if not cases:
-            print(f"No cases match {args.only}")
-            return 2
+    if not cases:
+        print("No cases match the filters")
+        return 2
 
     passed = total = 0
     cost = 0.0
